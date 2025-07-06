@@ -87,6 +87,8 @@ public abstract class AbstractNettyRemotingClient extends AbstractNettyRemoting 
     private static final long SCHEDULE_DELAY_MILLS = 60 * 1000L;
     private static final long SCHEDULE_INTERVAL_MILLS = 10 * 1000L;
     private static final String MERGE_THREAD_PREFIX = "rpcMergeMessageSend";
+    private static final int MAX_RECONNECT_THREAD = 1;
+    private static final String RECONNECT_THREAD_PREFIX = "rpcReconnect";
 
     private final CopyOnWriteArrayList<ChannelEventListener> channelEventListeners = new CopyOnWriteArrayList<>();
 
@@ -110,6 +112,7 @@ public abstract class AbstractNettyRemotingClient extends AbstractNettyRemoting 
     private final NettyClientBootstrap clientBootstrap;
     private final NettyClientChannelManager clientChannelManager;
     private final NettyPoolKey.TransactionRole transactionRole;
+    private ExecutorService reconnectExecutor;
     private ExecutorService mergeSendExecutorService;
     private TransactionMessageHandler transactionMessageHandler;
     protected volatile boolean enableClientBatchSendRequest;
@@ -137,6 +140,13 @@ public abstract class AbstractNettyRemotingClient extends AbstractNettyRemoting 
                     new NamedThreadFactory(getThreadPrefix(), MAX_MERGE_SEND_THREAD));
             mergeSendExecutorService.submit(new MergedSendRunnable());
         }
+        reconnectExecutor = new ThreadPoolExecutor(
+                MAX_RECONNECT_THREAD,
+                MAX_RECONNECT_THREAD,
+                KEEP_ALIVE_TIME,
+                TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                new NamedThreadFactory(getReconnectExecutorThreadPrefix(), MAX_RECONNECT_THREAD));
         super.init();
         clientBootstrap.start();
     }
@@ -268,6 +278,9 @@ public abstract class AbstractNettyRemotingClient extends AbstractNettyRemoting 
         if (mergeSendExecutorService != null) {
             mergeSendExecutorService.shutdown();
         }
+        if (reconnectExecutor != null) {
+            reconnectExecutor.shutdown();
+        }
         super.destroy();
     }
 
@@ -334,6 +347,10 @@ public abstract class AbstractNettyRemotingClient extends AbstractNettyRemoting 
 
     private String getThreadPrefix() {
         return AbstractNettyRemotingClient.MERGE_THREAD_PREFIX + THREAD_PREFIX_SPLIT_CHAR + transactionRole.name();
+    }
+
+    private String getReconnectExecutorThreadPrefix() {
+        return AbstractNettyRemotingClient.RECONNECT_THREAD_PREFIX + THREAD_PREFIX_SPLIT_CHAR + transactionRole.name();
     }
 
     /**
@@ -723,7 +740,13 @@ public abstract class AbstractNettyRemotingClient extends AbstractNettyRemoting 
                     FrameworkErrorCode.ExceptionCaught.getErrCode(),
                     NetUtil.toStringAddress(ctx.channel().remoteAddress()) + "connect exception. " + cause.getMessage(),
                     cause);
-            clientChannelManager.releaseChannel(ctx.channel(), getAddressFromChannel(ctx.channel()));
+            reconnectExecutor.execute(() -> {
+                try {
+                    clientChannelManager.releaseChannel(ctx.channel(), getAddressFromChannel(ctx.channel()));
+                } catch (Throwable throwable) {
+                    LOGGER.error("release channel error: {}", throwable.getMessage(), throwable);
+                }
+            });
             if (LOGGER.isInfoEnabled()) {
                 LOGGER.info("remove exception rm channel:{}", ctx.channel());
             }

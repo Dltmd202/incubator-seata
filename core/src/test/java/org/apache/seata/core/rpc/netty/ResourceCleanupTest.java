@@ -17,6 +17,7 @@
 package org.apache.seata.core.rpc.netty;
 
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelId;
 import org.apache.seata.core.protocol.MergeMessage;
 import org.apache.seata.core.protocol.MergedWarpMessage;
@@ -59,6 +60,7 @@ class ResourceCleanupTest {
     @BeforeEach
     void setUp() throws Exception {
         client = TmNettyRemotingClient.getInstance();
+        client.init();
 
         Field futuresField = AbstractNettyRemoting.class.getDeclaredField("futures");
         futuresField.setAccessible(true);
@@ -141,6 +143,26 @@ class ResourceCleanupTest {
 
         assertDoesNotThrow(() -> client.cleanupResourcesForChannel(null));
         assertTrue(futures.containsKey(1), "Future ID 1 should still exist");
+    }
+
+    @Test
+    void testExceptionCaughtTriggersChannelRelease() throws Exception {
+        AbstractNettyRemotingClient.ClientHandler handler = client.new ClientHandler();
+        ChannelHandlerContext mockCtx = mock(ChannelHandlerContext.class);
+        when(mockCtx.channel()).thenReturn(channel);
+        when(channel.remoteAddress()).thenReturn(new InetSocketAddress("127.0.0.1", 8091));
+        Field channelManagerField = AbstractNettyRemotingClient.class.getDeclaredField("clientChannelManager");
+        channelManagerField.setAccessible(true);
+        NettyClientChannelManager originalManager = (NettyClientChannelManager) channelManagerField.get(client);
+
+        NettyClientChannelManager spyManager = spy(originalManager);
+        channelManagerField.set(client, spyManager);
+
+        handler.exceptionCaught(mockCtx, new IllegalArgumentException("test"));
+
+        Thread.sleep(500);
+        verify(spyManager).releaseChannel(eq(channel), anyString());
+        channelManagerField.set(client, originalManager);
     }
 
     private RpcMessage createRpcMessage(int id) {
